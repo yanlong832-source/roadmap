@@ -1,35 +1,23 @@
-import { useState } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
-import { Phase, Topic } from "./types/roadmap";
-import { RoadmapFlow } from "./components/RoadmapFlow";
-import ResourceDrawer from "./components/ResourceDrawer";
 import { SearchHome } from "./components/SearchHome";
+import { RoadmapView } from "./components/RoadmapView";
 
 export default function App() {
-  // URL shape (spec 第 7 节): `/{keyword}`. A no-query root path means the
-  // home empty state; a keyword path will carry `/:keyword` in Task 10.
+  // URL shape (spec section 7): `/{keyword}`. Root path renders the home
+  // empty state; a keyword path renders the full roadmap view.
   const location = useLocation();
+  const navigate = useNavigate();
   const hasKeyword = location.pathname !== "/" && location.pathname !== "";
-  const [phases] = useState<Phase[]>([]);
-  const [activeTopic, setActiveTopic] = useState<Topic | null>(null);
 
   if (!hasKeyword) {
-    // Task 9: home empty state. Task 10 wires `onSearch` to navigate to
-    // `/{encodeURIComponent(keyword)}`.
-    return <SearchHome onSearch={() => {}} />;
+    // Home empty state: submit a normalized keyword -> navigate to the
+    // URL-encoded keyword path.
+    return (
+      <SearchHome onSearch={(keyword) => navigate(`/${encodeURIComponent(keyword)}`)} />
+    );
   }
 
-  // Task 10 will replace this placeholder branch with the full
-  // RoadmapView (streaming generation, toolbar, share, time summary).
-  return (
-    <div style={{ width: "100vw", height: "100vh", position: "relative" }}>
-      <RoadmapFlow
-        phases={phases}
-        generating={false}
-        onTopicClick={setActiveTopic}
-      />
-      <ResourceDrawer topic={activeTopic} onClose={() => setActiveTopic(null)} />
-    </div>
-  );
+  // Roadmap display page: streaming generation, toolbar, share, time summary.
+  return <RoadmapView />;
 }
