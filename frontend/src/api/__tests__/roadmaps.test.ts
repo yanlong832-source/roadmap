@@ -146,4 +146,49 @@ describe("subscribeRoadmapEvents", () => {
     expect(capturedUrl[0]).toContain("task_id=task-42");
     expect(capturedUrl[0]).toContain("my%20kw");
   });
+
+  it("routes server error frames through the message channel, not the native error event", () => {
+    // A named SSE "error" event must not rely on addEventListener("error"):
+    // the native EventSource connection-error also fires that listener
+    // with empty data, so server error frames are dispatched via the
+    // generic "message" listener (named events reach it too) while the
+    // onerror handler is reserved for real connection failures.
+    const registered: Record<string, EventListener> = {};
+    let onerrorHandler: EventListener | null = null;
+    vi.stubGlobal(
+      "EventSource",
+      class {
+        readyState = 1;
+        addEventListener = vi.fn((name: string, fn: EventListener) => {
+          registered[name] = fn;
+        });
+        close = vi.fn();
+        set onerror(fn: EventListener) {
+          onerrorHandler = fn;
+        }
+        get onerror() {
+          return onerrorHandler;
+        }
+      } as unknown as typeof EventSource,
+    );
+
+    const onPhase = vi.fn();
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    const unsub = subscribeRoadmapEvents("rag", "abc", onPhase, onDone, onError);
+
+    // Contract: no listener registered under "error" for server frames;
+    // server error frames arrive on the "message" channel.
+    expect(registered.error).toBeUndefined();
+    expect(registered.message).toBeDefined();
+
+    const serverErrorFrame = { error: "LLM request failed: LLM_API_KEY missing", retryable: true };
+    registered.message(
+      new MessageEvent("message", { data: JSON.stringify(serverErrorFrame) }),
+    );
+    expect(onError).toHaveBeenCalledWith(serverErrorFrame);
+    expect(onPhase).not.toHaveBeenCalled();
+    expect(onDone).not.toHaveBeenCalled();
+    expect(typeof (unsub as () => void)).toBe("function");
+  });
 });

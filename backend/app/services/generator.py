@@ -37,6 +37,17 @@ class LLMClient:
         self._base_url = base_url.rstrip("/")
         self._model = model
 
+    def _describe_failure(self, exc: BaseException) -> str:
+        """Build a user-facing reason for an LLM transport failure.
+
+        A missing/empty api_key is the most common cause in self-hosted
+        deployments; call it out explicitly instead of an empty detail.
+        """
+        if not self._api_key:
+            return "LLM_API_KEY is not configured on the server"
+        detail = str(exc) or exc.__class__.__name__
+        return detail
+
     async def complete_json(
         self,
         system: str,
@@ -68,7 +79,9 @@ class LLMClient:
                 response.raise_for_status()
                 data = response.json()
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
-            raise LLMError(f"LLM request failed: {exc}") from exc
+            raise LLMError(
+                f"LLM request failed: {self._describe_failure(exc)}"
+            ) from exc
 
         try:
             text = data["choices"][0]["message"]["content"]

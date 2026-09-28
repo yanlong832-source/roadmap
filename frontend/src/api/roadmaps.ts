@@ -113,21 +113,33 @@ export function subscribeRoadmapEvents(
     }
   });
 
-  source.addEventListener("error", (e: MessageEvent) => {
-    // SSE "error" event from the server carries JSON data;
-    // a native connection error has no data payload.
-    if (e.data) {
-      try {
-        onError(JSON.parse(e.data) as ErrorEvent);
-      } catch {
-        onError({ error: "malformed SSE error payload", retryable: true });
+  // Server-sent "error" event. The native EventSource "error" event
+  // (connection failure) always has empty data and fires the same
+  // listener with no payload, so server-side error frames are
+  // delivered through the "message" channel (generic listener for
+  // named events) to keep the two cases distinguishable.
+  source.addEventListener("message", (e: MessageEvent) => {
+    if (!e.data) return;
+    try {
+      const parsed = JSON.parse(e.data) as { error?: string };
+      if (parsed && parsed.error !== undefined) {
+        onError(parsed as unknown as ErrorEvent);
       }
-    } else {
-      // native connection error — retryable, let the UI offer a reconnect
-      onError({ error: "SSE connection lost", retryable: true });
+    } catch {
+      onError({ error: "malformed SSE error payload", retryable: true });
     }
     source.close();
   });
+
+  source.onerror = () => {
+    // Native connection-level error (network drop, server gone).
+    // After we close() the source ourselves (done/error terminals),
+    // a final onerror may fire — readyState CLOSED means we already
+    // handled a terminal event; ignore it.
+    if (source.readyState === EventSource.CLOSED) return;
+    onError({ error: "SSE connection lost", retryable: true });
+    source.close();
+  };
 
   return () => {
     source.close();
