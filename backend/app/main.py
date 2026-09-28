@@ -11,6 +11,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Roadmap API")
 
+# Module-level TaskRegistry singleton; Task 6 wires in_flight() to health.
+# Redis mirroring degrades gracefully when the backend is unreachable.
+from app.services.tasks import TaskRegistry
+_registry = TaskRegistry()
 origins_raw = os.getenv("CORS_ORIGINS", "*").strip()
 origins = [o.strip() for o in origins_raw.split(",") if o.strip()] or ["*"]
 if "*" not in origins:
@@ -41,5 +45,9 @@ def _llm_key_status() -> str:
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    # tasks_in_flight is hardcoded until Task 6 wires the real TaskRegistry.
-    return json.loads(json.dumps({"redis": _redis_status(), "llm_key": _llm_key_status(), "tasks_in_flight": 0}))
+    """Health endpoint: redis up/down, llm key status, live task count.
+
+    tasks_in_flight reflects the real TaskRegistry so deploy checks see
+    active generation work (Task 6).
+    """
+    return json.loads(json.dumps({"redis": _redis_status(), "llm_key": _llm_key_status(), "tasks_in_flight": _registry.in_flight()}))
