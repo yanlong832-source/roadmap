@@ -47,6 +47,8 @@ describe("fetchRoadmap", () => {
     );
     await expect(fetchRoadmap("rag")).rejects.toThrow("boom");
   });
+  // (SSE error-frame contract is covered by the dedicated test in the
+  // subscribeRoadmapEvents describe block below.)
 });
 
 /* ------------------------------------------------------------------ */
@@ -147,12 +149,13 @@ describe("subscribeRoadmapEvents", () => {
     expect(capturedUrl[0]).toContain("my%20kw");
   });
 
-  it("routes server error frames through the message channel, not the native error event", () => {
-    // A named SSE "error" event must not rely on addEventListener("error"):
-    // the native EventSource connection-error also fires that listener
-    // with empty data, so server error frames are dispatched via the
-    // generic "message" listener (named events reach it too) while the
-    // onerror handler is reserved for real connection failures.
+  it("routes server error frames through the message channel; onerror reports native failures", () => {
+    // Server terminal error frames use SSE event name "error". The
+    // EventSource contract: a named "error" event reaches the generic
+    // "message" listener (named events are NOT delivered to the native
+    // "error" listener unless it was explicitly registered). Native
+    // connection failures fire onerror while readyState is still
+    // CONNECTING/OPEN; after close() we must swallow the duplicate.
     const registered: Record<string, EventListener> = {};
     let onerrorHandler: EventListener | null = null;
     vi.stubGlobal(
@@ -163,7 +166,7 @@ describe("subscribeRoadmapEvents", () => {
           registered[name] = fn;
         });
         close = vi.fn();
-        set onerror(fn: EventListener) {
+        set onerror(fn: EventListener | null) {
           onerrorHandler = fn;
         }
         get onerror() {
@@ -177,18 +180,88 @@ describe("subscribeRoadmapEvents", () => {
     const onError = vi.fn();
     const unsub = subscribeRoadmapEvents("rag", "abc", onPhase, onDone, onError);
 
-    // Contract: no listener registered under "error" for server frames;
-    // server error frames arrive on the "message" channel.
-    expect(registered.error).toBeUndefined();
-    expect(registered.message).toBeDefined();
-
-    const serverErrorFrame = { error: "LLM request failed: LLM_API_KEY missing", retryable: true };
-    registered.message(
-      new MessageEvent("message", { data: JSON.stringify(serverErrorFrame) }),
-    );
-    expect(onError).toHaveBeenCalledWith(serverErrorFrame);
+    // Server error frame arrives on the "message" channel with data.
+    const serverFrame = { error: "LLM request failed: LLM_API_KEY is not configured on the server", retryable: true };
+    registered.message!(new MessageEvent("message", { data: JSON.stringify(serverFrame) }));
+    expect(onError).toHaveBeenCalledWith(serverFrame);
     expect(onPhase).not.toHaveBeenCalled();
     expect(onDone).not.toHaveBeenCalled();
-    expect(typeof (unsub as () => void)).toBe("function");
+
+    // The "done" terminal must close the source.
+    registered.done!(new MessageEvent("done", { data: "{}" }));
+    unsub();
+
+    // Native connection failure: onerror fires with source still open,
+    // reports "SSE connection lost" and closes; a second onerror after
+    // close is ignored (readyState === CLOSED).
+    vi.resetAllMocks();
+    const secondStub: Record<string, EventListener> = {};
+    let onerrorOfSecond: EventListener | null = null;
+    vi.stubGlobal(
+      "EventSource",
+      class {
+        readyState = 1; // OPEN
+        addEventListener = (name: string, fn: EventListener) => {
+          secondStub[name] = fn;
+        };
+        close = () => {
+          // Mirrors native EventSource: close() is synchronous and the
+          // socket is terminated immediately.
+          this.readyState = 2; // CLOSED
+        };
+        set onerror(fn: EventListener | null) {
+          onerrorOfSecond = fn;
+        }
+        get onerror() {
+          return onerrorOfSecond;
+        }
+      } as unknown as typeof EventSource,
+    );
+
+    const onError2 = vi.fn();
+    const unSub = subscribeRoadmapEvents("rag", "abc", vi.fn(), vi.fn(), onError2);
+
+    // Simulate the socket dropping: native onerror fires while OPEN.
+    onerrorOfSecond!(new Event("error"));
+    expect(onError2).toHaveBeenCalledTimes(1);
+    expect(onError2).toHaveBeenCalledWith({
+      error: "SSE connection lost",
+      retryable: true,
+    });
+    // The implementation closed the source; the stub's close() already
+    // flipped readyState to CLOSED.
+
+    // A fresh subscription must surface its own connection error,
+    // proving the per-source handler is attached correctly.
+    vi.resetAllMocks();
+    const thirdStub: Record<string, EventListener> = {};
+    let onerrorOfThird: EventListener | null = null;
+    vi.stubGlobal(
+      "EventSource",
+      class {
+        readyState = 1; // OPEN
+        addEventListener = (name: string, fn: EventListener) => {
+          thirdStub[name] = fn;
+        };
+        close = () => {
+          this.readyState = 2; // CLOSED
+        };
+        set onerror(fn: EventListener | null) {
+          onerrorOfThird = fn;
+        }
+        get onerror() {
+          return onerrorOfThird;
+        }
+      } as unknown as typeof EventSource,
+    );
+    const onError3 = vi.fn();
+    const unSub3 = subscribeRoadmapEvents("llm", "xyz", vi.fn(), vi.fn(), onError3);
+    onerrorOfThird!(new Event("error"));
+    expect(onError3).toHaveBeenCalledTimes(1);
+    expect(onError3).toHaveBeenCalledWith({
+      error: "SSE connection lost",
+      retryable: true,
+    });
+    unSub3();
   });
 });
