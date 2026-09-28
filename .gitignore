@@ -1,5 +1,8 @@
 .superpowers/
 .env
+.venv-task0/
+.venv/
+.superpowers/sdd/
 __pycache__/
 .pytest_cache/
 node_modules/
