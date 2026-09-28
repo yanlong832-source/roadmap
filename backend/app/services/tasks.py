@@ -14,6 +14,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
+import inspect
 from typing import Any
 
 import redis.asyncio as aioredis
@@ -170,20 +171,25 @@ class TaskRegistry:
         return self._tasks.get(task_id)
 
     def _mirror_status(self, state: TaskState) -> None:
+        """Fire-and-forget a Redis SET from a sync API.
+
+        The registry is sync so it cannot await the redis.asyncio client:
+        the result of ``set`` is scheduled as a detached task when it is a
+        coroutine (production redis.asyncio client).  Non-coroutine
+        results (e.g. a sync test double) are ignored.  A real connection
+        error surfaces on the detached task, where the done-callback
+        degrades ``self._available`` to False and logs the failure.
+        """
         if not self._available:
             return
         payload = json.dumps(
             {"status": state.status, "phases": state.phases},
             ensure_ascii=False,
         )
-        try:
-            self._client.set(_TASK_PREFIX + state.norm_keyword, payload)
-        except Exception:
-            logger.warning(
-                "task mirror write failed; degrading (in-memory only)",
-                exc_info=True,
-            )
-            self._available = False
+        result = self._client.set(_TASK_PREFIX + state.norm_keyword, payload)
+        if inspect.iscoroutine(result):
+            task = asyncio.ensure_future(result)
+            task.add_done_callback(lambda t: _log_mirror_failure(t, self))
 
     def _mirror_phases(self, state: TaskState) -> None:
         self._mirror_status(state)
@@ -193,3 +199,21 @@ class TaskRegistry:
             await self._client.aclose()
         except Exception:
             pass
+
+
+def _log_mirror_failure(task: asyncio.Task, registry: "TaskRegistry") -> None:
+    """Callback for a detached Redis SET task.
+
+    If the SET raised (connection error, etc.), degrade to in-memory mode
+    and log the failure.  CancelledError is silently swallowed.
+    """
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        return
+    if exc is not None:
+        logger.warning(
+            "task mirror write failed; degrading (in-memory only)",
+            exc_info=exc,
+        )
+        registry._available = False

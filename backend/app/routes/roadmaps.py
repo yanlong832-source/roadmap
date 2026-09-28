@@ -30,8 +30,19 @@ _cache: CacheService | None = None
 _registry: TaskRegistry | None = None
 _client: LLMClient | None = None
 
-# Background task timeout (spec: 90 s total task budget).
-_TASK_TIMEOUT_SECONDS = 90.0
+# Background task timeout.
+# Per-call budget defaults to 90 s (see generator._CALL_TIMEOUT_SECONDS);
+# 8-phase generations through a slow gateway can legitimately exceed
+# the original 90 s spec budget, so the total-task default is raised
+# to 300 s. Override via env LLM_TASK_TIMEOUT (seconds) when deploying.
+_TASK_TIMEOUT_SECONDS: float = float(os.getenv("LLM_TASK_TIMEOUT", "300"))
+
+# Idle keepalive interval for live SSE connections: send a comment
+# frame (": keepalive\n\n") every N seconds of silence so intermediate
+# proxies / load-balancers do not drop the TCP connection while the
+# LLM call is in flight (which can take up to LLM_CALL_TIMEOUT per
+# phase and LLM_TASK_TIMEOUT in total).  Override via SSE_KEEPALIVE.
+_SSE_KEEPALIVE_SECONDS: float = float(os.getenv("SSE_KEEPALIVE", "5"))
 
 
 def _get_cache() -> CacheService:
@@ -137,9 +148,21 @@ async def _run_generation(task_id: str, norm: str, force: bool) -> None:
                 phases.append(phase)
                 total_planned += 1
                 registry.push_phase(task_id, phase, total_planned, total_planned)
-    except (LLMError, TimeoutError, Exception) as exc:
-        logger.warning("generation task %s failed: %s", task_id, exc)
-        registry.mark_error(task_id, str(exc))
+    except TimeoutError:
+        reason = (
+            f"generation exceeded the {_TASK_TIMEOUT_SECONDS:.0f}s task budget"
+        )
+        logger.warning("generation task %s timed out", task_id)
+        registry.mark_error(task_id, reason)
+        return
+    except LLMError as exc:
+        reason = str(exc) or "LLM generation failed"
+        logger.warning("generation task %s failed: %s", task_id, reason)
+        registry.mark_error(task_id, reason)
+        return
+    except Exception:
+        logger.exception("generation task %s failed unexpectedly", task_id)
+        registry.mark_error(task_id, "internal error during generation")
         return
 
     # Build and cache the full roadmap.
@@ -174,7 +197,7 @@ async def sse_events(keyword: str, task_id: str = Query(...)) -> StreamingRespon
         async def _replay_only() -> AsyncGenerator[str, None]:
             for record in replayed_phases:
                 if "error" in record:
-                    yield f"event: error\ndata: {json.dumps(record, ensure_ascii=False)}\n\n"
+                    yield f"event: msg\ndata: {json.dumps(record, ensure_ascii=False)}\n\n"
                 else:
                     yield f"event: phase\ndata: {json.dumps(record, ensure_ascii=False)}\n\n"
             if task_status == "done":
@@ -197,7 +220,7 @@ async def sse_events(keyword: str, task_id: str = Query(...)) -> StreamingRespon
 
         async def _terminal() -> AsyncGenerator[str, None]:
             if terminal_status == "error":
-                yield 'event: error\ndata: {"error": "task failed", "retryable": true}\n\n'
+                yield 'event: msg\ndata: {"error": "task failed", "retryable": true}\n\n'
             else:
                 roadmap = await _get_cache().get(norm)
                 if roadmap:
@@ -209,18 +232,30 @@ async def sse_events(keyword: str, task_id: str = Query(...)) -> StreamingRespon
         # Replay any phases already in memory/Redis before subscribing.
         for record in replayed_phases:
             if "error" in record:
-                yield f"event: error\ndata: {json.dumps(record, ensure_ascii=False)}\n\n"
+                yield f"event: msg\ndata: {json.dumps(record, ensure_ascii=False)}\n\n"
             else:
                 yield f"event: phase\ndata: {json.dumps(record, ensure_ascii=False)}\n\n"
 
         # Now consume live events.
         try:
             while True:
-                item = await queue.get()
+                try:
+                    item = await asyncio.wait_for(
+                        queue.get(), timeout=_SSE_KEEPALIVE_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    # No real event yet; nudge the connection with a
+                    # comment frame so proxies keep the TCP socket open.
+                    yield ": keepalive\n\n"
+                    continue
+
                 if item is None:
                     break
                 event_name, payload = item
-                yield f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                # The "error" frame is renamed to "msg" in the SSE stream to avoid
+                # EventSource's special-cased "error" native event name.
+                sse_name = "msg" if event_name == "error" else event_name
+                yield f"event: {sse_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
                 if event_name in ("done", "error"):
                     break
         finally:

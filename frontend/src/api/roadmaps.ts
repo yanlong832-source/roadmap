@@ -87,61 +87,98 @@ export async function startGeneration(
  * Deduplication: the caller is responsible for deduplicating by
  * `phase.id` — this layer emits every `phase` event as-is.
  */
+/**
+ * Options controlling auto-reconnect behavior when the EventSource drops
+ * on the wire (typical cause: an idle proxy / mobile hotspot closing the
+ * TCP connection after a silent period).
+ *
+ * - maxReconnects: give up after this many attempts. Default 3.
+ * - onReconnect:  invoked after a successful reconnect so the caller can
+ *                 re-sync from the cache (GET roadmap → render if done).
+ */
+export interface SubscribeOptions {
+  maxReconnects?: number;
+  onReconnect?: (attempt: number) => void;
+}
+
 export function subscribeRoadmapEvents(
   keyword: string,
   taskId: string,
   onPhase: (event: PhaseEvent) => void,
   onDone: (event: DoneEvent) => void,
   onError: (event: ErrorEvent) => void,
+  options: SubscribeOptions = {},
 ): () => void {
+  const maxReconnects = options.maxReconnects ?? 3;
+  let reconnectCount = 0;
+  let intentionalClose = false;
+
   const url = `${API_BASE}/${encodeURIComponent(keyword)}/events?task_id=${encodeURIComponent(taskId)}`;
-  const source = new EventSource(url);
+  let source = new EventSource(url);
 
-  source.addEventListener("phase", (e: MessageEvent) => {
-    try {
-      onPhase(JSON.parse(e.data) as PhaseEvent);
-    } catch {
-      /* ignore malformed payload */
-    }
-  });
-
-  source.addEventListener("done", (e: MessageEvent) => {
-    try {
-      onDone(JSON.parse(e.data) as DoneEvent);
-    } finally {
-      source.close();
-    }
-  });
-
-  // Server-sent "error" event. The native EventSource "error" event
-  // (connection failure) always has empty data and fires the same
-  // listener with no payload, so server-side error frames are
-  // delivered through the "message" channel (generic listener for
-  // named events) to keep the two cases distinguishable.
-  source.addEventListener("message", (e: MessageEvent) => {
-    if (!e.data) return;
-    try {
-      const parsed = JSON.parse(e.data) as { error?: string };
-      if (parsed && parsed.error !== undefined) {
-        onError(parsed as unknown as ErrorEvent);
+  // bindAll wires every handler onto a (possibly new) EventSource instance
+  // and registers an onerror that either reconnects (bounded by
+  // maxReconnects) or gives up.  Reconnection is cheap: the server
+  // replays already-emitted phases from the registry, so late
+  // subscribers catch up without losing events.
+  function bindAll(src: EventSource): void {
+    src.addEventListener("phase", (e: MessageEvent) => {
+      try {
+        onPhase(JSON.parse(e.data) as PhaseEvent);
+      } catch {
+        /* ignore malformed payload */
       }
-    } catch {
-      onError({ error: "malformed SSE error payload", retryable: true });
-    }
-    source.close();
-  });
+    });
 
-  source.onerror = () => {
-    // Native connection-level error (network drop, server gone).
-    // After we close() the source ourselves (done/error terminals),
-    // a final onerror may fire — readyState CLOSED means we already
-    // handled a terminal event; ignore it.
-    if (source.readyState === EventSource.CLOSED) return;
-    onError({ error: "SSE connection lost", retryable: true });
-    source.close();
-  };
+    src.addEventListener("done", (e: MessageEvent) => {
+      try {
+        onDone(JSON.parse(e.data) as DoneEvent);
+      } finally {
+        src.close();
+        intentionalClose = true;
+      }
+    });
+
+    // Server-sent error frames use the named SSE event "msg" to avoid
+    // EventSource's special-cased "error" event (which maps to onerror).
+    src.addEventListener("msg", (e: MessageEvent) => {
+      if (!e.data) return;
+      try {
+        const parsed = JSON.parse(e.data) as { error?: string };
+        if (parsed && parsed.error !== undefined) {
+          onError(parsed as unknown as ErrorEvent);
+        }
+      } catch {
+        onError({ error: "malformed SSE error payload", retryable: true });
+      }
+      src.close();
+      intentionalClose = true;
+    });
+
+    src.onerror = () => {
+      // Native connection-level error (network drop, server gone, proxy
+      // idle-close).  After we close() the source ourselves (done/error
+      // terminals), a final onerror may fire; ignore it.
+      if (src.readyState === EventSource.CLOSED) return;
+
+      if (!intentionalClose && reconnectCount < maxReconnects) {
+        reconnectCount += 1;
+        src.close();
+        source = new EventSource(url);
+        bindAll(source);
+        options.onReconnect?.(reconnectCount);
+      } else {
+        onError({ error: "SSE connection lost", retryable: true });
+        src.close();
+        intentionalClose = true;
+      }
+    };
+  }
+
+  bindAll(source);
 
   return () => {
+    intentionalClose = true;
     source.close();
   };
 }

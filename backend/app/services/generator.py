@@ -12,6 +12,7 @@ The generation protocol (spec section 5 / plan Task 4):
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import AsyncIterator
 
@@ -23,6 +24,7 @@ from app.prompts import SYSTEM_PROMPT, phase_user_prompt, plan_prompt
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 
 _DEFAULT_TIMEOUT_SECONDS = 60.0
+_CALL_TIMEOUT_SECONDS: float = float(os.getenv("LLM_CALL_TIMEOUT", "90"))
 _FIRST_ATTEMPT_TEMPERATURE = 0.4
 _RETRY_TEMPERATURE = 0.2
 
@@ -53,7 +55,7 @@ class LLMClient:
         system: str,
         user: str,
         temperature: float = _FIRST_ATTEMPT_TEMPERATURE,
-        timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+        timeout: float = _CALL_TIMEOUT_SECONDS,
     ) -> dict:
         """Call the OpenAI-compatible /chat/completions endpoint and parse JSON.
 
@@ -107,7 +109,7 @@ def _parse_json_text(text: str) -> dict:
 async def generate_phases(
     client: LLMClient,
     norm_keyword: str,
-    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    timeout: float = _CALL_TIMEOUT_SECONDS,
 ) -> AsyncIterator[Phase]:
     """Stream phases for a normalized keyword: plan once, then per phase.
 

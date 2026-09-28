@@ -322,7 +322,7 @@ async def test_sse_error_event_closes_stream():
             raw = await r.aread()
     events = _parse_sse(raw.decode())
     names = [n for n, _ in events]
-    assert names[-1] == "error"
+    assert names[-1] == "msg"
     err = events[-1][1]
     assert err["retryable"] is True
     assert "error" in err

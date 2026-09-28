@@ -159,13 +159,20 @@
          expect.anything(), // force 默认值
        ]);
        expect(subscribeRoadmapEvents).toHaveBeenCalledTimes(1);
-       expect(subscribeRoadmapEvents.mock.calls[0]).toEqual([
-         "rag",
-         "task-1",
-         expect.any(Function),
-         expect.any(Function),
-         expect.any(Function),
-       ]);
+        const call = subscribeRoadmapEvents.mock.calls[0];
+        expect(call?.slice(0, 5)).toEqual([
+          "rag",
+          "task-1",
+          expect.any(Function),
+          expect.any(Function),
+          expect.any(Function),
+        ]);
+        // 6th arg: auto-reconnect options (wired by RoadmapView)
+        const opts = call?.[5] as { maxReconnects: number; onReconnect: unknown } | undefined;
+        expect(opts).toEqual({
+          maxReconnects: 3,
+          onReconnect: expect.any(Function),
+        });
      });
 
      // 第一个 phase 事件 → 节点增量出现

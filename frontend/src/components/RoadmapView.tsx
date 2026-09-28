@@ -142,6 +142,19 @@
           handlePhase,
           handleDone,
           handleError,
+          {
+            maxReconnects: 3,
+            onReconnect: async () => {
+              if (supersededRef.current) return;
+              try {
+                const roadmap = await fetchRoadmap(keyword);
+                handleDone({ roadmap } as { roadmap: Roadmap });
+              } catch {
+                // Cache miss (task still running); the replayed SSE
+                // phase events will re-build the UI.
+              }
+            },
+          },
         );
       } catch (err) {
         setGenerating(false);

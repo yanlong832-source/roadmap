@@ -180,9 +180,10 @@ describe("subscribeRoadmapEvents", () => {
     const onError = vi.fn();
     const unsub = subscribeRoadmapEvents("rag", "abc", onPhase, onDone, onError);
 
-    // Server error frame arrives on the "message" channel with data.
+    // Server error frame arrives on the "msg" channel (renamed from "error"
+    // to avoid EventSource's native onerror special-case for event name "error").
     const serverFrame = { error: "LLM request failed: LLM_API_KEY is not configured on the server", retryable: true };
-    registered.message!(new MessageEvent("message", { data: JSON.stringify(serverFrame) }));
+    registered.msg!(new MessageEvent("msg", { data: JSON.stringify(serverFrame) }));
     expect(onError).toHaveBeenCalledWith(serverFrame);
     expect(onPhase).not.toHaveBeenCalled();
     expect(onDone).not.toHaveBeenCalled();
@@ -219,7 +220,17 @@ describe("subscribeRoadmapEvents", () => {
     );
 
     const onError2 = vi.fn();
-    const unSub = subscribeRoadmapEvents("rag", "abc", vi.fn(), vi.fn(), onError2);
+    const onReconnect = vi.fn();
+    // maxReconnects: 0 disables auto-reconnect, so the first native
+    // onerror reports the connection loss immediately (legacy behavior).
+    const unSub = subscribeRoadmapEvents(
+      "rag",
+      "abc",
+      vi.fn(),
+      vi.fn(),
+      onError2,
+      { maxReconnects: 0, onReconnect },
+    );
 
     // Simulate the socket dropping: native onerror fires while OPEN.
     onerrorOfSecond!(new Event("error"));
@@ -228,11 +239,60 @@ describe("subscribeRoadmapEvents", () => {
       error: "SSE connection lost",
       retryable: true,
     });
+    expect(onReconnect).not.toHaveBeenCalled();
     // The implementation closed the source; the stub's close() already
     // flipped readyState to CLOSED.
 
-    // A fresh subscription must surface its own connection error,
-    // proving the per-source handler is attached correctly.
+    // A fresh subscription with the default 3 reconnects must try
+    // THREE new EventSource instances before surfacing the connection
+    // error, and must re-attach the per-source onerror on each fresh
+    // instance (proving the bind-then-reconnect chain is correct).
+    vi.resetAllMocks();
+    const recorded: Array<{ onerror: EventListener | null; readyState: number }> = [];
+    vi.stubGlobal(
+      "EventSource",
+      class {
+        constructor(url: string) {
+          recorded.push(this as unknown as { onerror: EventListener | null; readyState: number });
+        }
+        readyState = 1; // OPEN
+        addEventListener = vi.fn();
+        close = () => {
+          this.readyState = 2; // CLOSED
+        };
+        onerror: EventListener | null = null;
+      } as unknown as typeof EventSource,
+    );
+    const onErrorR = vi.fn();
+    const onReconnectR = vi.fn();
+    const unSubR = subscribeRoadmapEvents(
+      "rag",
+      "abc",
+      vi.fn(),
+      vi.fn(),
+      onErrorR,
+      { onReconnect: onReconnectR },
+    );
+    // Fire the native onerror on the current (latest) instance three
+    // times; each time the implementation should open a NEW instance.
+    for (let i = 0; i < 3; i += 1) {
+      recorded[recorded.length - 1].onerror!(new Event("error"));
+    }
+    expect(recorded.length).toBe(4); // initial + 3 reconnects
+    expect(onReconnectR).toHaveBeenCalledTimes(3);
+    expect(onReconnectR).toHaveBeenLastCalledWith(3);
+    // The 4th drop exceeds maxReconnects: surface the error, stop.
+    recorded[recorded.length - 1].onerror!(new Event("error"));
+    expect(onErrorR).toHaveBeenCalledTimes(1);
+    expect(onErrorR).toHaveBeenCalledWith({
+      error: "SSE connection lost",
+      retryable: true,
+    });
+    expect(recorded.length).toBe(4); // no further reconnects
+    unSubR();
+  });
+
+  it("per-subscription onerror isolation: a fresh subscription surfaces its own connection error", () => {
     vi.resetAllMocks();
     const thirdStub: Record<string, EventListener> = {};
     let onerrorOfThird: EventListener | null = null;
@@ -255,7 +315,17 @@ describe("subscribeRoadmapEvents", () => {
       } as unknown as typeof EventSource,
     );
     const onError3 = vi.fn();
-    const unSub3 = subscribeRoadmapEvents("llm", "xyz", vi.fn(), vi.fn(), onError3);
+    // A *different* subscription (different keyword/task) with reconnects
+    // disabled must surface its own connection error independently — proving
+    // the per-source handler is attached to the right instance, not shared.
+    const unSub3 = subscribeRoadmapEvents(
+      "llm",
+      "xyz",
+      vi.fn(),
+      vi.fn(),
+      onError3,
+      { maxReconnects: 0 },
+    );
     onerrorOfThird!(new Event("error"));
     expect(onError3).toHaveBeenCalledTimes(1);
     expect(onError3).toHaveBeenCalledWith({
