@@ -20,6 +20,7 @@ from app.models import Phase, Roadmap
 from app.services.cache import CacheService
 from app.services.generator import LLMClient, LLMError, generate_phases
 from app.services.tasks import TaskRegistry
+from app.services.verify import verify_phase_resources
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,9 @@ async def _run_generation(task_id: str, norm: str, force: bool) -> None:
         async with asyncio.timeout(_TASK_TIMEOUT_SECONDS):
             total_planned = 0
             async for phase in generate_phases(client, norm):
+                # Post-LLM pass: probe every resource URL and drop the
+                # ones the model hallucinated (404 / dead Bilibili page).
+                phase = await verify_phase_resources(phase)
                 phases.append(phase)
                 total_planned += 1
                 registry.push_phase(task_id, phase, total_planned, total_planned)
