@@ -9,6 +9,7 @@ unavailable the registry still works in-memory for the current stream
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -53,6 +54,8 @@ class TaskRegistry:
         self._available = True
         self._tasks: dict[str, TaskState] = {}
         self._by_keyword: dict[str, str] = {}  # norm_keyword -> task_id
+        # task_id -> subscriber queues for live SSE events.
+        self._subscribers: dict[str, set[asyncio.Queue]] = {}
 
     # -- lifecycle --------------------------------------------------------
 
@@ -87,13 +90,23 @@ class TaskRegistry:
         record["total"] = total
         state.phases.append(record)
         self._mirror_phases(state)
+        # SSE contract: broadcast ("phase", record) to all subscribers.
+        self._broadcast(task_id, "phase", record)
 
-    def mark_done(self, task_id: str) -> None:
+    def mark_done(self, task_id: str, done_payload: dict | None = None) -> None:
+        """Terminal success.
+
+        `done_payload` is the full Roadmap dict; the SSE `done` event must
+        carry the complete Roadmap (spec contract). When omitted, subscribers
+        receive an empty payload dict.
+        """
         state = self._get(task_id)
         if state is None:
             return
         state.status = "done"
         self._mirror_status(state)
+        self._broadcast(task_id, "done", done_payload if done_payload is not None else {})
+        self._close_subscribers(task_id)
 
     def mark_error(self, task_id: str, error: str) -> None:
         state = self._get(task_id)
@@ -102,6 +115,8 @@ class TaskRegistry:
         state.status = "error"
         state.phases.append({"error": error, "retryable": True})
         self._mirror_status(state)
+        self._broadcast(task_id, "error", {"error": error, "retryable": True})
+        self._close_subscribers(task_id)
 
     # -- queries ----------------------------------------------------------
 
@@ -126,7 +141,30 @@ class TaskRegistry:
         state = self._get(task_id)
         return state.status if state else None
 
-    # -- internals ---------------------------------------------------------
+    # -- SSE subscription ---------------------------------------------------
+
+    def subscribe(self, task_id: str, queue: asyncio.Queue) -> None:
+        """Register a queue as a live subscriber for this task's events."""
+        self._subscribers.setdefault(task_id, set()).add(queue)
+
+    def unsubscribe(self, task_id: str, queue: asyncio.Queue) -> None:
+        """Remove a subscriber; idempotent."""
+        subs = self._subscribers.get(task_id)
+        if subs:
+            subs.discard(queue)
+            if not subs:
+                del self._subscribers[task_id]
+
+    def _broadcast(self, task_id: str, name: str, payload: dict) -> None:
+        """Push (name, payload) onto every subscriber queue of the task."""
+        for queue in list(self._subscribers.get(task_id, ())):
+            queue.put_nowait((name, payload))
+
+    def _close_subscribers(self, task_id: str) -> None:
+        """After a terminal state, put a None sentinel on each queue."""
+        for queue in list(self._subscribers.get(task_id, ())):
+            queue.put_nowait(None)
+
 
     def _get(self, task_id: str) -> TaskState | None:
         return self._tasks.get(task_id)

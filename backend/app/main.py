@@ -15,6 +15,11 @@ app = FastAPI(title="Roadmap API")
 # Redis mirroring degrades gracefully when the backend is unreachable.
 from app.services.tasks import TaskRegistry
 _registry = TaskRegistry()
+
+# Roadmap generation routes (cache read, async generate, SSE stream) - Task 5.
+from app.routes.roadmaps import router as roadmaps_router
+app.include_router(roadmaps_router)
+
 origins_raw = os.getenv("CORS_ORIGINS", "*").strip()
 origins = [o.strip() for o in origins_raw.split(",") if o.strip()] or ["*"]
 if "*" not in origins:
