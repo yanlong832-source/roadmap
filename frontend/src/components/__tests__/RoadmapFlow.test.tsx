@@ -99,7 +99,10 @@ describe("RoadmapFlow layout", () => {
     const p1t1 = nodes.find((n) => n.textContent?.includes("向量检索"))!;
     const yOf = (el: HTMLElement) =>
       Number(el.style.transform.match(/translate\([^,]+,\s*([^)]+)px\)/)?.[1] ?? "0");
-    expect(yOf(p1t1)).toBe(0);
+    // p1t1 is in the left column, centered against the block's midline;
+    // with 2 topics (left=1, right=1) both columns are centered at
+    // blockY + PHASE_CARD_HEIGHT/2 - TOPIC_NODE_HEIGHT/2 = 0 + 48 - 58 = -10.
+    expect(yOf(p1t1)).toBe(-10);
     expect(yOf(p2t1)).toBeGreaterThan(yOf(p1t1));
   });
 });

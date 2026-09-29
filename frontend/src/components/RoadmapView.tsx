@@ -6,6 +6,7 @@
    useState,
  } from "react";
  import { useLocation } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 
  import {
    NotGeneratedError,
@@ -13,7 +14,10 @@
    startGeneration,
    subscribeRoadmapEvents,
  } from "../api/roadmaps";
+import { fetchProgress, setProgress } from "../api/progress";
  import { Roadmap, Topic } from "../types/roadmap";
+import { normalizeKeyword } from "../types/roadmap";
+import { LearningStatus, NEXT_STATUS, computeFingerprint } from "../layout/roadmapLayout";
  import { RoadmapFlow, PartialPhase } from "./RoadmapFlow";
  import ResourceDrawer from "./ResourceDrawer";
 import TutorDrawer from "./TutorDrawer";
@@ -46,6 +50,9 @@ import TutorDrawer from "./TutorDrawer";
    const [toast, setToast] = useState<string | null>(null);
    const [activeTopic, setActiveTopic] = useState<Topic | null>(null);
   const [tutorOpen, setTutorOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [statuses, setStatuses] = useState<Record<string, LearningStatus>>({});
+  const [keywordInput, setKeywordInput] = useState("");
 
    // Dedup: the API layer forwards every SSE phase event as-is; the render
    // layer is responsible for dropping duplicates of the same phase id.
@@ -59,6 +66,80 @@ import TutorDrawer from "./TutorDrawer";
   // the previous one. The "superseded" flag is set when a new startGen begins
   // and cleared when the old generation stream terminates (done/error/unsub).
   const supersededRef = useRef(false);
+
+  const navigate = useNavigate();
+
+  /**
+   * Fetch persisted learning states for the current keyword and merge them
+   * into the component-local record (keyed by topic id).
+   */
+  const loadProgress = useCallback(async () => {
+    if (!keyword) return;
+    try {
+      const fetched = await fetchProgress(keyword);
+      if (Object.keys(fetched).length > 0) {
+        const topicStatuses: Record<string, LearningStatus> = {};
+        phases.forEach((phase) => {
+          phase.topics.forEach((t) => {
+            if (!t.id || !t.title) return;
+            const fp = computeFingerprint(
+              normalizeKeyword(keyword),
+              phase.name,
+              t.title,
+            );
+            if (fetched[fp]) {
+              topicStatuses[t.id] = fetched[fp] as LearningStatus;
+            }
+          });
+        });
+        if (Object.keys(topicStatuses).length > 0) {
+          setStatuses(topicStatuses);
+        }
+      }
+    } catch {
+      // Network failure: degrade silently.
+    }
+  }, [keyword, phases]);
+
+  /** Optimistic status cycle + fire-and-forget POST to persist. */
+  const handleCycleStatus = useCallback(
+    (topic: Topic) => {
+      if (!topic.id || !keyword) return;
+      const current: LearningStatus = statuses[topic.id] ?? "not_started";
+      const next: LearningStatus = NEXT_STATUS[current];
+      setStatuses((prev) => ({ ...prev, [topic.id]: next }));
+      const phase = phases.find((p) => p.topics.some((t) => t.id === topic.id));
+      const fp = computeFingerprint(
+        normalizeKeyword(keyword),
+        phase?.name ?? "",
+        topic.title,
+      );
+      void setProgress(keyword, { [fp]: next });
+    },
+    [statuses, keyword, phases],
+  );
+
+  /** Toggle a phase collapsed/expanded. */
+  const handleToggleCollapse = useCallback((phaseId: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(phaseId)) next.delete(phaseId);
+      else next.add(phaseId);
+      return next;
+    });
+  }, []);
+
+  /** Navigate to a new keyword via the toolbar input. */
+  const handleKeywordSubmit = useCallback(
+    (e: React.FormEvent) => {
+      e.preventDefault();
+      const kw = normalizeKeyword(keywordInput);
+      if (!kw) return;
+      navigate(`/${encodeURIComponent(kw)}`);
+      setKeywordInput("");
+    },
+    [keywordInput, navigate],
+  );
 
    const closeCurrentSubscription = useCallback(() => {
      if (unsubscribeRef.current) {
@@ -104,6 +185,8 @@ import TutorDrawer from "./TutorDrawer";
        event.roadmap.total_duration_hint ? event.roadmap.total_duration_hint : null,
      );
      closeCurrentSubscription();
+    // Fetch persisted learning states after the roadmap is fully loaded.
+    void loadProgress();
    }, [closeCurrentSubscription]);
 
    const handleError = useCallback((event: { error: string; retryable: boolean }) => {
@@ -175,8 +258,6 @@ import TutorDrawer from "./TutorDrawer";
    // Initial load: try the cache first; a 404 is silently converted to
    // generation (the user never sees an error for not-generated keywords).
    useEffect(() => {
-     let cancelled = false;
-
      async function load() {
        try {
          const roadmap = await fetchRoadmap(keyword);
@@ -185,6 +266,8 @@ import TutorDrawer from "./TutorDrawer";
            roadmap.total_duration_hint ? roadmap.total_duration_hint : null,
          );
          setGenerating(false);
+        // Now that the roadmap is loaded, fetch persisted learning states.
+        void loadProgress();
        } catch (err) {
          if (err instanceof NotGeneratedError) {
            await startGen(false);
@@ -195,8 +278,8 @@ import TutorDrawer from "./TutorDrawer";
        }
      }
 
-    // Start the load flow. Note: we deliberately do NOT guard with
-    // `cancelled` here — a re-render of this effect (triggered by state
+    // Start the load flow. Note: we deliberately do NOT guard with a
+    // cancelled flag here — a re-render of this effect (triggered by state
     // updates from the load flow itself re-creating `startGen`) must not
     // abort an in-flight generation. Unmount is handled by the cleanup
     // below, which closes the SSE subscription; any pending state
@@ -204,7 +287,6 @@ import TutorDrawer from "./TutorDrawer";
     if (keyword) void load();
 
      return () => {
-       cancelled = true;
        closeCurrentSubscription();
      };
    // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -256,6 +338,37 @@ import TutorDrawer from "./TutorDrawer";
          }}
        >
          <h1 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>{keyword}</h1>
+        <form onSubmit={handleKeywordSubmit} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <input
+            data-testid="roadmap-search-input"
+            type="text"
+            value={keywordInput}
+            onChange={(e) => setKeywordInput(e.target.value)}
+            placeholder="输入关键词跳转…"
+            style={{
+              width: 180,
+              padding: "5px 10px",
+              fontSize: 13,
+              border: "1px solid #d0d5dd",
+              borderRadius: 6,
+              outline: "none",
+            }}
+          />
+          <button
+            type="submit"
+            data-testid="roadmap-search-submit"
+            style={{
+              padding: "5px 12px",
+              fontSize: 13,
+              border: "1px solid #d0d5dd",
+              borderRadius: 6,
+              background: "#fff",
+              cursor: "pointer",
+            }}
+          >
+            跳转
+          </button>
+        </form>
          <div style={{ flex: 1 }} />
          <button
            data-testid="roadmap-regenerate"
@@ -370,6 +483,10 @@ import TutorDrawer from "./TutorDrawer";
              phases={phases}
              generating={generating}
              onTopicClick={setActiveTopic}
+            collapsed={collapsed}
+            statuses={statuses}
+            onToggleCollapse={handleToggleCollapse}
+            onCycleStatus={handleCycleStatus}
            />
          )}
 

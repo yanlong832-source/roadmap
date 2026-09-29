@@ -1,3 +1,4 @@
+
 import {
   ReactFlow,
   ReactFlowProvider,
@@ -9,8 +10,14 @@ import { useMemo } from "react";
 import "@xyflow/react/dist/style.css";
 
 import { Phase, Topic } from "../types/roadmap";
-import { LoadingNode, TopicNode, TOPIC_NODE_HEIGHT } from "./TopicNode";
-import { PhaseCardNode, PHASE_CARD_WIDTH, PHASE_CARD_HEIGHT } from "./PhaseCard";
+import { LoadingNode, TopicNode, TOPIC_NODE_HEIGHT, TOPIC_GAP } from "./TopicNode";
+import { PhaseCardNode, PHASE_CARD_HEIGHT } from "./PhaseCard";
+import {
+  LearningStatus,
+  buildChainEdge,
+  layoutPhase,
+  rowHeightFor,
+} from "../layout/roadmapLayout";
 
 /**
  * A phase as it exists mid-generation: `topics` may be empty or only
@@ -28,16 +35,20 @@ export interface RoadmapFlowProps {
   generating: boolean;
   /** Called with the full topic object (incl. resources) when a card is clicked. */
   onTopicClick: (topic: Topic) => void;
+  /** Phase ids whose topic nodes are hidden (collapsed directory blocks). */
+  collapsed?: Set<string>;
+  /** Learning state per topic id; missing keys read as "not_started". */
+  statuses?: Record<string, LearningStatus>;
+  /** Toggle a phase block collapsed/expanded. */
+  onToggleCollapse?: (phaseId: string) => void;
+  /** Cycle one topic's learning state. */
+  onCycleStatus?: (topic: Topic) => void;
 }
 
 /* ---- layout constants (fixed node sizes prevent hover jitter) ---- */
 
-const PHASE_GAP = 130; // vertical gap between phase blocks
-const PHASE_TO_TOPICS_GAP = 90; // horizontal gap between a block and its topics
-const TOPIC_GAP = 56; // vertical gap between sibling topics inside one phase
-const ROW_HEIGHT = TOPIC_NODE_HEIGHT + PHASE_GAP;
 const BLOCK_X = 0; // phase block column
-const TOPICS_X = BLOCK_X + PHASE_CARD_WIDTH + PHASE_TO_TOPICS_GAP;
+const RIGHT_COLUMN_OFFSET = 140; // topic x offset, block-relative (layoutPhase)
 
 const NODE_TYPES = {
   topic: TopicNode,
@@ -62,12 +73,19 @@ function topicNode(
   position: { x: number; y: number },
   topic: Topic,
   onTopicClick: (topic: Topic) => void,
+  status?: LearningStatus,
+  onCycleStatus?: (topic: Topic) => void,
 ) {
   return {
     id,
     type: "topic",
     position,
-    data: { topic, onTopicClick },
+    data: {
+      topic,
+      onTopicClick,
+      ...(status ? { status } : {}),
+      ...(onCycleStatus ? { onCycleStatus } : {}),
+    },
   } as unknown as ReactFlowJsonObject;
 }
 
@@ -75,57 +93,109 @@ function phaseCardNode(
   id: string,
   position: { x: number; y: number },
   phase: PartialPhase,
+  collapsed: boolean,
+  onToggleCollapse?: (phaseId: string) => void,
+  statuses?: Record<string, LearningStatus>,
 ) {
   return {
     id,
     type: "phaseCard",
     position,
-    data: { phase, topicCount: phase.topics.length },
+    data: {
+      phase,
+      topicCount: phase.topics.length,
+      collapsed,
+      onToggleCollapse,
+      ...(statuses ? { statuses } : {}),
+    },
   } as unknown as ReactFlowJsonObject;
-}
-
-function topicStackTopY(blockRowY: number, count: number): number {
-  // Vertically center the topic stack against the block card's center.
-  const stackHeight =
-    count * TOPIC_NODE_HEIGHT + Math.max(count - 1, 0) * TOPIC_GAP;
-  const centered = blockRowY + PHASE_CARD_HEIGHT / 2 - stackHeight / 2;
-  return Math.max(0, centered);
 }
 
 /**
  * Vertical layered layout, "directory + details" style:
  *
- * - phase i block: x = BLOCK_X, y = i * ROW_HEIGHT
- * - phase i topics: x = TOPICS_X, stacked vertically and centered
- *   against the block so the block reads as a directory spine
- * - each block fans out to its topics with **dashed** edges
- *   (block ->. topic); the progress chain between blocks stays solid
- *   (block i -> block i+1)
- * - `generating` appends a single loading placeholder to the tail of the
- *   last in-progress phase's topic column, dashed-linked from the block
- * - minimap + controls enabled
+ * - phase block: x = BLOCK_X; block y accumulates via rowHeightFor, which
+ *   grows with per-side topic counts and shrinks for collapsed phases,
+ *   so the blocks below slide up when you fold a dense phase
+ * - topics: two columns, even index left / odd right, each column centered
+ *   against the block card's midline (layoutPhase owns the math)
+ * - each expanded block fans out to its topics with **dashed** edges;
+ *   the progress chain between blocks stays **solid** via the named
+ *   bottom-center / top-center handles
+ * - `generating` appends one loading placeholder at the tail of the
+ *   in-progress phase's right column, dashed-linked from the block
+ * - fitView runs on mount only, so a manual drag never gets yanked back
  */
-export function RoadmapFlow({ phases, generating, onTopicClick }: RoadmapFlowProps) {
+export function RoadmapFlow({
+  phases,
+  generating,
+  onTopicClick,
+  collapsed,
+  statuses,
+  onToggleCollapse,
+  onCycleStatus,
+}: RoadmapFlowProps) {
   const { nodes, edges } = useMemo(() => {
     const nodes: ReactFlowJsonObject[] = [];
     const edges: ReactFlowJsonObject[] = [];
 
+    let blockY = 0;
     let prevBlockId: string | null = null;
 
-    phases.forEach((phase, i) => {
-      const blockY = i * ROW_HEIGHT;
-      const count = phase.topics.length;
-      const firstTopicY = topicStackTopY(blockY, count);
+    phases.forEach((phase) => {
+      const isCollapsed = collapsed?.has(phase.id) ?? false;
+      // Collapsed phases render zero topic nodes; the row height then
+      // collapses to the base so later blocks shift up (plan Review #3).
+      const topics = isCollapsed ? [] : phase.topics;
 
-      phase.topics.forEach((t, k) => {
-        const topic = t as Topic;
-        const topicY = firstTopicY + k * (TOPIC_NODE_HEIGHT + TOPIC_GAP);
+      // Statuses for this phase's cards (keyed by topic id, as RoadmapView
+      // maintains them; missing entries default to not_started).
+      const phaseStatuses: Record<string, LearningStatus> | undefined =
+        statuses
+          ? Object.fromEntries(
+              phase.topics.map((t) => [
+                t.id ?? "",
+                statuses[t.id ?? ""] ?? "not_started",
+              ]),
+            )
+          : undefined;
+
+      // The block card itself (topicCount shows the real size even collapsed).
+      nodes.push(
+        phaseCardNode(
+          phase.id,
+          { x: BLOCK_X, y: blockY },
+          phase,
+          isCollapsed,
+          onToggleCollapse,
+          phaseStatuses,
+        ),
+      );
+
+      // Two-column placement, block-relative; translate to absolute x.
+      // Partial<Topic> may have undefined id/title mid-stream; fall back
+      // to placeholders so the layout engine still gets clean strings.
+      const placed = layoutPhase({
+        phaseId: phase.id,
+        phaseName: phase.name,
+        topics: topics.map((t, i) => ({
+          id: t.id ?? `${phase.id}-partial-${i}`,
+          title: t.title ?? "",
+        })),
+        blockY,
+      });
+
+      placed.forEach((p, k) => {
+        const topic = topics[k] as Topic;
+        const topicId = topic.id ?? `${phase.id}-partial-${k}`;
         nodes.push(
           topicNode(
-            topic.id,
-            { x: TOPICS_X, y: topicY },
+            topicId,
+            { x: BLOCK_X + p.x, y: p.y },
             topic,
             onTopicClick,
+            statuses ? statuses[topicId] ?? "not_started" : undefined,
+            onCycleStatus,
           ),
         );
 
@@ -142,61 +212,74 @@ export function RoadmapFlow({ phases, generating, onTopicClick }: RoadmapFlowPro
         } as unknown as ReactFlowJsonObject);
       });
 
-      // Solid progress link: previous block -> this block.
+      // Solid progress link: previous block -> this block (named handles).
       if (prevBlockId) {
         edges.push({
-          id: `${prevBlockId}->${phase.id}`,
-          source: prevBlockId,
-          target: phase.id,
-          type: "straight",
+          ...buildChainEdge(prevBlockId, phase.id),
           animated: false,
-          style: { stroke: "#4f46e5", strokeWidth: 2 },
-          markerEnd: "arrowclosed",
         } as unknown as ReactFlowJsonObject);
       }
 
-      // The block card itself (topicCount may be 0 mid-stream).
-      nodes.push(
-        phaseCardNode(
-          phase.id,
-          { x: BLOCK_X, y: blockY },
-          phase,
-        ),
-      );
-
+      const maxSideCount = isCollapsed
+        ? 0
+        : Math.ceil(phase.topics.length / 2);
+      blockY += rowHeightFor(maxSideCount, isCollapsed);
       prevBlockId = phase.id;
     });
 
-    // Loading placeholder: tail of the last in-progress phase's topic column.
-    if (generating) {
+    // Loading placeholder: tail of the last in-progress phase's right column.
+    if (generating && phases.length > 0) {
       const lastPhase = phases[phases.length - 1];
-      const rowCount = lastPhase ? lastPhase.topics.length : 0;
-      const lastBlockY = lastPhase
-        ? (phases.length - 1) * ROW_HEIGHT
-        : 0;
-      const topicY =
-        topicStackTopY(lastBlockY, rowCount) +
-        rowCount * (TOPIC_NODE_HEIGHT + TOPIC_GAP);
-      const key = `loading-${lastPhase?.id ?? "head"}`;
-      nodes.push(loadingPlaceholderNode(key, { x: TOPICS_X, y: topicY }) as never);
+      const lastIsCollapsed = collapsed?.has(lastPhase.id) ?? false;
+      const lastBlockY =
+        blockY -
+        rowHeightFor(
+          lastIsCollapsed ? 0 : Math.ceil(lastPhase.topics.length / 2),
+          lastIsCollapsed,
+        );
+      // Right column stack (odd-indexed topics) of the last phase.
+      const rightCount = Math.floor(lastPhase.topics.length / 2);
+      const rightStackHeight =
+        rightCount * TOPIC_NODE_HEIGHT +
+        Math.max(rightCount - 1, 0) * TOPIC_GAP;
+      const topicY = Math.max(
+        0,
+        lastBlockY +
+          PHASE_CARD_HEIGHT / 2 -
+          rightStackHeight / 2 +
+          rightCount * (TOPIC_NODE_HEIGHT + TOPIC_GAP),
+      );
+      const key = `loading-${lastPhase.id}`;
+      nodes.push(
+        loadingPlaceholderNode(key, {
+          x: BLOCK_X + RIGHT_COLUMN_OFFSET,
+          y: topicY,
+        }) as never,
+      );
 
       // Dashed link from the in-progress block's next free handle.
-      if (lastPhase) {
-        edges.push({
-          id: `${lastPhase.id}#t${rowCount}->${key}`,
-          source: lastPhase.id,
-          sourceHandle: `t${rowCount}`,
-          target: key,
-          type: "smooth",
-          animated: false,
-          style: { strokeDasharray: "5 4", stroke: "#c7d2fe" },
-          markerEnd: "arrowclosed",
-        } as unknown as ReactFlowJsonObject);
-      }
+      edges.push({
+        id: `${lastPhase.id}#t${lastPhase.topics.length}->${key}`,
+        source: lastPhase.id,
+        sourceHandle: `t${lastPhase.topics.length}`,
+        target: key,
+        type: "smooth",
+        animated: false,
+        style: { strokeDasharray: "5 4", stroke: "#c7d2fe" },
+        markerEnd: "arrowclosed",
+      } as unknown as ReactFlowJsonObject);
     }
 
     return { nodes, edges };
-  }, [phases, generating, onTopicClick]);
+  }, [
+    phases,
+    generating,
+    onTopicClick,
+    collapsed,
+    statuses,
+    onToggleCollapse,
+    onCycleStatus,
+  ]);
 
   return (
     <ReactFlowProvider>
@@ -210,6 +293,7 @@ export function RoadmapFlow({ phases, generating, onTopicClick }: RoadmapFlowPro
           nodeTypes={NODE_TYPES}
           onlyRenderVisibleElements={false}
           fitView
+          fitViewOptions={{ padding: 0.1 }}
           minZoom={0.2}
           maxZoom={2}
           proOptions={{ hideAttribution: true }}
@@ -223,4 +307,3 @@ export function RoadmapFlow({ phases, generating, onTopicClick }: RoadmapFlowPro
     </ReactFlowProvider>
   );
 }
-

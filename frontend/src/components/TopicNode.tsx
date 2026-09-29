@@ -2,6 +2,11 @@ import { Handle, NodeProps, Position } from "@xyflow/react";
 import { memo } from "react";
 
 import { Topic } from "../types/roadmap";
+import {
+  LearningStatus,
+  NEXT_STATUS,
+  STATUS_LABELS,
+} from "../layout/roadmapLayout";
 
 /**
  * Fixed-size card so hover states never shift the layout.
@@ -10,13 +15,28 @@ import { Topic } from "../types/roadmap";
 export const TOPIC_NODE_WIDTH = 220;
 export const TOPIC_NODE_HEIGHT = 116;
 
+const STATUS_COLORS: Record<LearningStatus, string> = {
+  not_started: "#d1d5db",
+  in_progress: "#f59e0b",
+  done: "#10b981",
+};
+
 /**
  * Custom node card: title + one-line description + resource-count badge.
  * Clicking the card hands the full Topic (with resources) to onTopicClick.
+ * The status pill cycles the learning state without opening the drawer.
  */
 export const TopicNode = memo(function TopicNode(props: NodeProps) {
-  const topic = (props.data as { topic?: Topic }).topic;
-  const onTopicClick = (props.data as { onTopicClick?: (t: Topic) => void }).onTopicClick;
+  const data = props.data as {
+    topic?: Topic;
+    onTopicClick?: (t: Topic) => void;
+    status?: LearningStatus;
+    onCycleStatus?: (topic: Topic) => void;
+  };
+  const topic = data.topic;
+  const onTopicClick = data.onTopicClick;
+  const status: LearningStatus = data.status ?? "not_started";
+  const onCycleStatus = data.onCycleStatus;
   const selected = props.selected;
 
   // Data is optional in the v12 contract; guard instead of throwing.
@@ -34,7 +54,7 @@ export const TopicNode = memo(function TopicNode(props: NodeProps) {
         padding: "12px 14px",
         borderRadius: 8,
         border: `1px solid ${selected ? "#4f46e5" : "#d1d5db"}`,
-        borderLeft: "4px solid #4f46e5",
+        borderLeft: `4px solid ${STATUS_COLORS[status]}`,
         background: "#ffffff",
         boxShadow: selected ? "0 0 0 2px rgba(79,70,229,0.25)" : "0 1px 2px rgba(0,0,0,0.08)",
         cursor: "pointer",
@@ -46,17 +66,64 @@ export const TopicNode = memo(function TopicNode(props: NodeProps) {
       onClick={() => onTopicClick?.(topic)}
     >
       <Handle type="target" position={Position.Top} />
-      <div
-        style={{
-          fontWeight: 600,
-          fontSize: 14,
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-        }}
-      >
-        {topic.title}
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            fontWeight: 600,
+            fontSize: 14,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {topic.title}
+        </div>
+        {status === "done" ? (
+          <span
+            aria-label="已完成"
+            style={{
+              color: "#10b981",
+              fontSize: 13,
+              fontWeight: 700,
+              flexShrink: 0,
+            }}
+          >
+            ✓
+          </span>
+        ) : null}
       </div>
+
+      {onCycleStatus ? (
+        <button
+          data-testid={`topic-status-${topic.id}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onCycleStatus(topic);
+          }}
+          style={{
+            alignSelf: "flex-start",
+            border: "1px solid " + STATUS_COLORS[status],
+            borderRadius: 999,
+            padding: "1px 8px",
+            fontSize: 11,
+            fontWeight: 600,
+            cursor: "pointer",
+            background: status === "in_progress" ? "#fffbeb" : "#f9fafb",
+            color:
+              status === "done"
+                ? "#059669"
+                : status === "in_progress"
+                  ? "#b45309"
+                  : "#6b7280",
+          }}
+          title={`点击切换为「${STATUS_LABELS[NEXT_STATUS[status]]}」`}
+          aria-label={`状态：${STATUS_LABELS[status]}`}
+        >
+          {STATUS_LABELS[status]}
+        </button>
+      ) : null}
       <div
         style={{
           fontSize: 12,
@@ -142,3 +209,5 @@ if (styleTag) {
 }
 
 
+
+export const TOPIC_GAP = 56; // vertical gap between sibling topic rows (matches layout module)
