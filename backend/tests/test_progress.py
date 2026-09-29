@@ -37,6 +37,23 @@ def test_fingerprint_matches_node_vector():
     # sha1("rag|基础|向量数据库入门").digest("hex").slice(0,12)
     assert compute_fingerprint("rag", "基础", "向量数据库入门") == "fccf4d91a6cd"
 
+# All four vectors from frontend/src/layout/fingerprintVectors.ts (source of
+# truth; this test pins the backend implementation against the same
+# ground truth that the frontend sha1Hex is verified against).
+_CROSS_LANG_VECTORS = [
+    ("rag", "基础", "向量数据库入门", "fccf4d91a6cd"),
+    ("git", "进阶", "rebase 与合并", "596405d2b10d"),
+    ("rag", "阶段1", "大模型推理基础", "904967a6a0b7"),
+    ("健身", "初级", "深蹲动作要领", "ed4ca58b0bb2"),
+]
+
+
+def test_fingerprint_matches_all_node_vectors():
+    """Cross-language check: every vector in fingerprintVectors.ts."""
+    for kw, phase_name, title, expected in _CROSS_LANG_VECTORS:
+        assert compute_fingerprint(kw, phase_name, title) == expected, (
+            f"vector {kw}|{phase_name}|{title} mismatch"
+        )
 
 
 
