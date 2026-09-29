@@ -10,18 +10,13 @@ import { Topic } from "../types/roadmap";
 export const TOPIC_NODE_WIDTH = 220;
 export const TOPIC_NODE_HEIGHT = 116;
 
-interface TopicNodeData {
-  topic?: Topic;
-  onTopicClick?: (topic: Topic) => void;
-}
-
 /**
  * Custom node card: title + one-line description + resource-count badge.
  * Clicking the card hands the full Topic (with resources) to onTopicClick.
  */
-export const TopicNode = memo(function TopicNode(props: NodeProps<TopicNodeData>) {
-  const topic = props.data?.topic;
-  const onTopicClick = props.data?.onTopicClick;
+export const TopicNode = memo(function TopicNode(props: NodeProps) {
+  const topic = (props.data as { topic?: Topic }).topic;
+  const onTopicClick = (props.data as { onTopicClick?: (t: Topic) => void }).onTopicClick;
   const selected = props.selected;
 
   // Data is optional in the v12 contract; guard instead of throwing.
@@ -145,3 +140,5 @@ if (styleTag) {
     "@keyframes roadmap-spin { to { transform: rotate(360deg); } }";
   document.head.appendChild(styleTag);
 }
+
+

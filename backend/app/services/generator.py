@@ -51,6 +51,48 @@ class LLMClient:
         detail = str(exc) or exc.__class__.__name__
         return detail
 
+
+    async def complete_text(
+        self,
+        system: str,
+        user: str,
+        temperature: float = 0.4,
+        timeout: float = _CALL_TIMEOUT_SECONDS,
+        history: list[dict] | None = None,
+    ) -> str:
+        """One chat completion returning raw text (no JSON parsing).
+
+        Used by the tutor, whose answers are prose. ``history`` carries
+        prior user/assistant turns for multi-turn coaching.
+        """
+        url = f"{self._base_url}/chat/completions"
+        messages: list[dict] = [{"role": "system", "content": system}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": user})
+        payload = {
+            "model": self._model,
+            "temperature": temperature,
+            "messages": messages,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    json=payload,
+                )
+                response.raise_for_status()
+                data = response.json()
+        except (httpx.HTTPError, json.JSONDecodeError) as exc:
+            raise LLMError(
+                f"LLM request failed: {self._describe_failure(exc)}"
+            ) from exc
+        try:
+            return data["choices"][0]["message"]["content"] or ""
+        except (KeyError, IndexError, TypeError) as exc:
+            raise LLMError(f"unexpected LLM response shape: {exc}") from exc
+
     async def complete_json(
         self,
         system: str,
@@ -200,3 +242,4 @@ async def _plan_with_retry(
         except LLMError as exc:
             last_error = exc
     raise last_error if last_error else LLMError("plan generation failed")
+

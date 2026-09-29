@@ -16,11 +16,12 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.keywords import normalize_keyword
-from app.models import Phase, Roadmap
+from app.models import Phase, Roadmap, Resource
 from app.services.cache import CacheService
 from app.services.generator import LLMClient, LLMError, generate_phases
 from app.services.tasks import TaskRegistry
 from app.services.verify import verify_phase_resources
+from app.services.websearch import enrich_resources_with_search
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,10 @@ async def _run_generation(task_id: str, norm: str, force: bool) -> None:
                 # Post-LLM pass: probe every resource URL and drop the
                 # ones the model hallucinated (404 / dead Bilibili page).
                 phase = await verify_phase_resources(phase)
+                # Second post-LLM pass: corroborate surviving resources
+                # against a live web search; anything uncorroborated
+                # is downgraded to a guaranteed-valid search link.
+                phase = _enrich_phase_resources(phase)
                 phases.append(phase)
                 total_planned += 1
                 registry.push_phase(task_id, phase, total_planned, total_planned)
@@ -266,3 +271,37 @@ async def sse_events(keyword: str, task_id: str = Query(...)) -> StreamingRespon
             registry.unsubscribe(task_id, queue)
 
     return StreamingResponse(_stream(), media_type="text/event-stream")
+
+def _enrich_phase_resources(phase: Phase) -> Phase:
+    """Corroborate each topic's resources against a live web search.
+
+    The enrichment is best-effort and synchronous; a failure degrades
+    to the LLM-picked URLs unchanged (the URL-probe pass has already
+    dropped the dead ones, so we never regress below that guarantee).
+    """
+    for topic in phase.topics:
+        if not topic.resources:
+            continue
+        try:
+            raw = [
+                {"title": r.title, "url": r.url, "type": r.type, "note": r.note}
+                for r in topic.resources
+            ]
+            enriched = enrich_resources_with_search(topic.title, raw)
+            topic.resources = [
+                Resource(
+                    title=r.get("title", ""),
+                    url=r.get("url", ""),
+                    type=r.get("type", "doc"),
+                    note=r.get("note"),
+                )
+                for r in enriched
+            ]
+        except Exception:
+            logger.warning(
+                "websearch enrichment failed for topic %s; keeping LLM URLs",
+                topic.id,
+                exc_info=True,
+            )
+    return phase
+

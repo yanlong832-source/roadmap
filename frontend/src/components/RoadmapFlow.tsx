@@ -9,12 +9,8 @@ import { useMemo } from "react";
 import "@xyflow/react/dist/style.css";
 
 import { Phase, Topic } from "../types/roadmap";
-import {
-  LoadingNode,
-  TopicNode,
-  TOPIC_NODE_WIDTH,
-  TOPIC_NODE_HEIGHT,
-} from "./TopicNode";
+import { LoadingNode, TopicNode, TOPIC_NODE_HEIGHT } from "./TopicNode";
+import { PhaseCardNode, PHASE_CARD_WIDTH, PHASE_CARD_HEIGHT } from "./PhaseCard";
 
 /**
  * A phase as it exists mid-generation: `topics` may be empty or only
@@ -34,15 +30,19 @@ export interface RoadmapFlowProps {
   onTopicClick: (topic: Topic) => void;
 }
 
-/* ---- layout constants (fixed node size prevents hover jitter) ---- */
+/* ---- layout constants (fixed node sizes prevent hover jitter) ---- */
 
-const PHASE_GAP = 120; // vertical gap between phase rows
-const TOPIC_GAP = 60; // horizontal gap between sibling topics
+const PHASE_GAP = 130; // vertical gap between phase blocks
+const PHASE_TO_TOPICS_GAP = 90; // horizontal gap between a block and its topics
+const TOPIC_GAP = 56; // vertical gap between sibling topics inside one phase
 const ROW_HEIGHT = TOPIC_NODE_HEIGHT + PHASE_GAP;
+const BLOCK_X = 0; // phase block column
+const TOPICS_X = BLOCK_X + PHASE_CARD_WIDTH + PHASE_TO_TOPICS_GAP;
 
 const NODE_TYPES = {
   topic: TopicNode,
   loading: LoadingNode,
+  phaseCard: PhaseCardNode,
 };
 
 function loadingPlaceholderNode(
@@ -71,15 +71,38 @@ function topicNode(
   } as unknown as ReactFlowJsonObject;
 }
 
+function phaseCardNode(
+  id: string,
+  position: { x: number; y: number },
+  phase: PartialPhase,
+) {
+  return {
+    id,
+    type: "phaseCard",
+    position,
+    data: { phase, topicCount: phase.topics.length },
+  } as unknown as ReactFlowJsonObject;
+}
+
+function topicStackTopY(blockRowY: number, count: number): number {
+  // Vertically center the topic stack against the block card's center.
+  const stackHeight =
+    count * TOPIC_NODE_HEIGHT + Math.max(count - 1, 0) * TOPIC_GAP;
+  const centered = blockRowY + PHASE_CARD_HEIGHT / 2 - stackHeight / 2;
+  return Math.max(0, centered);
+}
+
 /**
- * Vertical layered React Flow layout.
+ * Vertical layered layout, "directory + details" style:
  *
- * - phase i row: y = i * ROW_HEIGHT (never shifts when later phases stream in)
- * - topics within a phase: x evenly distributed starting at x = 0
- * - links: sibling topics chain left-to-right (prereq -> successor) and the
- *   last topic of a phase links down to the first topic of the next phase
+ * - phase i block: x = BLOCK_X, y = i * ROW_HEIGHT
+ * - phase i topics: x = TOPICS_X, stacked vertically and centered
+ *   against the block so the block reads as a directory spine
+ * - each block fans out to its topics with **dashed** edges
+ *   (block ->. topic); the progress chain between blocks stays solid
+ *   (block i -> block i+1)
  * - `generating` appends a single loading placeholder to the tail of the
- *   last (in-progress) phase
+ *   last in-progress phase's topic column, dashed-linked from the block
  * - minimap + controls enabled
  */
 export function RoadmapFlow({ phases, generating, onTopicClick }: RoadmapFlowProps) {
@@ -87,81 +110,86 @@ export function RoadmapFlow({ phases, generating, onTopicClick }: RoadmapFlowPro
     const nodes: ReactFlowJsonObject[] = [];
     const edges: ReactFlowJsonObject[] = [];
 
-    let prevPhaseTail: string | null = null;
+    let prevBlockId: string | null = null;
 
     phases.forEach((phase, i) => {
-      const rowY = i * ROW_HEIGHT;
+      const blockY = i * ROW_HEIGHT;
       const count = phase.topics.length;
+      const firstTopicY = topicStackTopY(blockY, count);
 
-      // Evenly distribute topics horizontally within the row.
-      // With `n` topics: x_k = k * (TOPIC_NODE_WIDTH + TOPIC_GAP)
       phase.topics.forEach((t, k) => {
         const topic = t as Topic;
+        const topicY = firstTopicY + k * (TOPIC_NODE_HEIGHT + TOPIC_GAP);
         nodes.push(
           topicNode(
             topic.id,
-            { x: k * (TOPIC_NODE_WIDTH + TOPIC_GAP), y: rowY },
+            { x: TOPICS_X, y: topicY },
             topic,
             onTopicClick,
           ),
         );
 
-        // Within-phase chain: link previous topic to this one.
-        if (k > 0) {
-          const prev = phase.topics[k - 1] as Topic;
-          edges.push({
-            id: `${prev.id}->${topic.id}`,
-            source: prev.id,
-            target: topic.id,
-            type: "smooth",
-            animated: false,
-            markerEnd: "arrowclosed",
-          } as unknown as ReactFlowJsonObject);
-        }
-      });
-
-      // Cross-phase link: tail of previous phase -> head of this phase.
-      if (prevPhaseTail && count > 0) {
-        const head = phase.topics[0] as Topic;
+        // Dashed fan-out: the block's k-th source handle -> this topic.
         edges.push({
-          id: `${prevPhaseTail}->${head.id}`,
-          source: prevPhaseTail,
-          target: head.id,
+          id: `${phase.id}#t${k}->${topic.id}`,
+          source: phase.id,
+          sourceHandle: `t${k}`,
+          target: topic.id,
           type: "smooth",
           animated: false,
+          style: { strokeDasharray: "5 4", stroke: "#9ca3af" },
+          markerEnd: "arrowclosed",
+        } as unknown as ReactFlowJsonObject);
+      });
+
+      // Solid progress link: previous block -> this block.
+      if (prevBlockId) {
+        edges.push({
+          id: `${prevBlockId}->${phase.id}`,
+          source: prevBlockId,
+          target: phase.id,
+          type: "straight",
+          animated: false,
+          style: { stroke: "#4f46e5", strokeWidth: 2 },
           markerEnd: "arrowclosed",
         } as unknown as ReactFlowJsonObject);
       }
 
-      if (count > 0) {
-        prevPhaseTail = (phase.topics[count - 1] as Topic).id;
-      }
+      // The block card itself (topicCount may be 0 mid-stream).
+      nodes.push(
+        phaseCardNode(
+          phase.id,
+          { x: BLOCK_X, y: blockY },
+          phase,
+        ),
+      );
+
+      prevBlockId = phase.id;
     });
 
-    // Loading placeholder: tail of the last in-progress phase while generating.
-    // If no phase yet, placeholder sits on row 0.
+    // Loading placeholder: tail of the last in-progress phase's topic column.
     if (generating) {
       const lastPhase = phases[phases.length - 1];
       const rowCount = lastPhase ? lastPhase.topics.length : 0;
-      const rowY = lastPhase
+      const lastBlockY = lastPhase
         ? (phases.length - 1) * ROW_HEIGHT
         : 0;
-      const x = rowCount * (TOPIC_NODE_WIDTH + TOPIC_GAP);
+      const topicY =
+        topicStackTopY(lastBlockY, rowCount) +
+        rowCount * (TOPIC_NODE_HEIGHT + TOPIC_GAP);
       const key = `loading-${lastPhase?.id ?? "head"}`;
-      nodes.push(loadingPlaceholderNode(key, { x, y: rowY }) as never);
+      nodes.push(loadingPlaceholderNode(key, { x: TOPICS_X, y: topicY }) as never);
 
-      // Link the last real topic (or nothing) to the placeholder.
-      const source =
-        lastPhase && lastPhase.topics.length > 0
-          ? (lastPhase.topics[lastPhase.topics.length - 1] as Topic).id
-          : null;
-      if (source) {
+      // Dashed link from the in-progress block's next free handle.
+      if (lastPhase) {
         edges.push({
-          id: `${source}->${key}`,
-          source,
+          id: `${lastPhase.id}#t${rowCount}->${key}`,
+          source: lastPhase.id,
+          sourceHandle: `t${rowCount}`,
           target: key,
           type: "smooth",
           animated: false,
+          style: { strokeDasharray: "5 4", stroke: "#c7d2fe" },
           markerEnd: "arrowclosed",
         } as unknown as ReactFlowJsonObject);
       }
@@ -195,3 +223,4 @@ export function RoadmapFlow({ phases, generating, onTopicClick }: RoadmapFlowPro
     </ReactFlowProvider>
   );
 }
+

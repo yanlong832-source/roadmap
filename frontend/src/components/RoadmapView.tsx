@@ -16,6 +16,7 @@
  import { Roadmap, Topic } from "../types/roadmap";
  import { RoadmapFlow, PartialPhase } from "./RoadmapFlow";
  import ResourceDrawer from "./ResourceDrawer";
+import TutorDrawer from "./TutorDrawer";
 
  /**
   * Roadmap display page (spec section 7 / plan Task 10).
@@ -44,6 +45,7 @@
    const [error, setError] = useState<string | null>(null);
    const [toast, setToast] = useState<string | null>(null);
    const [activeTopic, setActiveTopic] = useState<Topic | null>(null);
+  const [tutorOpen, setTutorOpen] = useState(false);
 
    // Dedup: the API layer forwards every SSE phase event as-is; the render
    // layer is responsible for dropping duplicates of the same phase id.
@@ -282,6 +284,24 @@
          >
            分享
          </button>
+         <button
+           data-testid="tutor-open"
+           onClick={() => setTutorOpen((v) => !v)}
+           style={{
+             padding: "6px 14px",
+             fontSize: 13,
+             border: "1px solid #d0d5dd",
+             borderRadius: 6,
+             background: tutorOpen ? "#eef2ff" : "#fff",
+             color: tutorOpen ? "#4f46e5" : "#374151",
+             cursor: "pointer",
+             display: "flex",
+             alignItems: "center",
+             gap: 6,
+           }}
+         >
+           🎓 学习教练
+         </button>
        </div>
 
        {/* ---------- Toast ---------- */}
@@ -357,6 +377,13 @@
            topic={activeTopic}
            onClose={() => setActiveTopic(null)}
          />
+
+         <TutorDrawer
+           open={tutorOpen}
+           onClose={() => setTutorOpen(false)}
+           keyword={keyword}
+           activeTopic={activeTopic}
+         />
        </div>
 
        {/* ---------- Bottom: time summary ---------- */}
@@ -383,3 +410,4 @@
  }
 
  export default RoadmapView;
+

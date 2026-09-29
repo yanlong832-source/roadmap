@@ -19,6 +19,8 @@ _registry = TaskRegistry()
 # Roadmap generation routes (cache read, async generate, SSE stream) - Task 5.
 from app.routes.roadmaps import router as roadmaps_router
 app.include_router(roadmaps_router)
+from app.routes.tutor import router as tutor_router
+app.include_router(tutor_router)
 
 origins_raw = os.getenv("CORS_ORIGINS", "*").strip()
 origins = [o.strip() for o in origins_raw.split(",") if o.strip()] or ["*"]
@@ -56,3 +58,4 @@ async def health() -> dict[str, Any]:
     active generation work (Task 6).
     """
     return json.loads(json.dumps({"redis": _redis_status(), "llm_key": _llm_key_status(), "tasks_in_flight": _registry.in_flight()}))
+
