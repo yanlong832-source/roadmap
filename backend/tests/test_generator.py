@@ -89,12 +89,13 @@ async def test_bad_json_retried_once_then_raises():
     route.side_effect = [
         HttpxResponse(200, json=PLAN_BODY),
         bad,
-        bad,  # retry also bad -> LLMError
+        bad,
+        bad,  # 3 attempts, all bad -> LLMError
     ]
     with pytest.raises(LLMError):
         [p async for p in generate_phases(make_client(), "rag")]
-    # plan(1) + first attempt(1) + retry(1)
-    assert route.call_count == 3
+    # plan(1) + 3 phase attempts
+    assert route.call_count == 4
 
 
 @pytest.mark.asyncio
@@ -117,6 +118,42 @@ async def test_http_error_raises_llmerror():
     route = respx.post("https://llm.test/v1/chat/completions")
     route.side_effect = [
         HttpxResponse(500, text="boom"),
+        HttpxResponse(500, text="boom"),
+        HttpxResponse(500, text="boom"),
     ]
     with pytest.raises(LLMError):
         [p async for p in generate_phases(make_client(), "rag")]
+    # plan retried 3 times, all failing -> LLMError before any phase
+    assert route.call_count == 3
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_plan_empty_content_retried_then_recovers():
+    """Regression: empty content on the plan call used to kill the whole
+    generation with `json.loads` failing on '' before any retry happened."""
+    route = respx.post("https://llm.test/v1/chat/completions")
+    route.side_effect = [
+        HttpxResponse(200, json=_completions_body("")),  # gateway hiccup
+        HttpxResponse(200, json=PLAN_BODY),  # retry recovers
+        HttpxResponse(200, json=PHASE1_BODY),
+        HttpxResponse(200, json=PHASE2_BODY),
+    ]
+    phases = [p async for p in generate_phases(make_client(), "rag")]
+    assert [p.id for p in phases] == ["p1", "p2"]
+    assert route.call_count == 4
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_plan_bad_payload_exhausts_attempts():
+    bad_plan = _completions_body(json.dumps({"total_phases": 99, "phase_names": []}))
+    route = respx.post("https://llm.test/v1/chat/completions")
+    route.side_effect = [
+        HttpxResponse(200, json=bad_plan),
+        HttpxResponse(200, json=bad_plan),
+        HttpxResponse(200, json=bad_plan),
+    ]
+    with pytest.raises(LLMError):
+        [p async for p in generate_phases(make_client(), "rag")]
+    assert route.call_count == 3

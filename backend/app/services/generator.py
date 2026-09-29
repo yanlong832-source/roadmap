@@ -22,6 +22,7 @@ from app.models import Phase
 from app.prompts import SYSTEM_PROMPT, phase_user_prompt, plan_prompt
 
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
+_MAX_ATTEMPTS = 3  # total attempts including the first one
 
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _CALL_TIMEOUT_SECONDS: float = float(os.getenv("LLM_CALL_TIMEOUT", "90"))
@@ -94,15 +95,26 @@ class LLMClient:
 
 
 def _parse_json_text(text: str) -> dict:
-    """Strip optional markdown fences, then decode the JSON payload."""
+    """Strip optional markdown fences, then decode the JSON payload.
+
+    Raises LLMError with a descriptive message when the content is empty
+    or unparseable, so the caller can retry with a lower temperature.
+    """
+    if text is None or not text.strip():
+        raise LLMError("LLM returned empty content (likely a gateway timeout or truncation)")
     match = _FENCE_RE.match(text)
-    candidate = match.group(1) if match else text
+    candidate = match.group(1).strip() if match else text.strip()
+    if not candidate:
+        raise LLMError("LLM returned only markdown fences with no content inside")
     try:
         parsed = json.loads(candidate)
     except json.JSONDecodeError as exc:
-        raise LLMError(f"LLM returned non-JSON content: {exc}") from exc
+        snippet = candidate[:120].replace("\n", " ")
+        raise LLMError(
+            f"LLM returned non-JSON content ({exc}); first 120 chars: {snippet!r}"
+        ) from exc
     if not isinstance(parsed, dict):
-        raise LLMError("LLM JSON payload is not an object")
+        raise LLMError(f"LLM JSON payload is {type(parsed).__name__}, expected object")
     return parsed
 
 
@@ -117,16 +129,9 @@ async def generate_phases(
     gets exactly one retry at temperature 0.2, otherwise LLMError is
     raised and the generator stops.
     """
-    plan = await client.complete_json(
-        SYSTEM_PROMPT, plan_prompt(norm_keyword), timeout=timeout
+    total_phases, phase_names = await _plan_with_retry(
+        client, norm_keyword, timeout
     )
-    try:
-        total_phases = int(plan["total_phases"])
-        phase_names = [str(n) for n in plan["phase_names"]]
-    except (KeyError, TypeError, ValueError) as exc:
-        raise LLMError(f"invalid plan payload: {exc}") from exc
-    if not (1 <= total_phases <= len(phase_names)):
-        raise LLMError("total_phases does not match phase_names")
 
     generated: list[dict] = []
     for index in range(total_phases):
@@ -145,9 +150,15 @@ async def generate_phases(
 async def _complete_phase_with_retry(
     client: LLMClient, prompt: str, timeout: float
 ) -> Phase:
-    temperatures = [_FIRST_ATTEMPT_TEMPERATURE, _RETRY_TEMPERATURE]
+    """Generate one Phase with bounded retries.
+
+    Three attempts total: first at temperature 0.4, remaining two at 0.2.
+    All LLMError / validation failures trigger the next attempt; after
+    the last failure the most recent error is re-raised.
+    """
     last_error: LLMError | None = None
-    for temperature in temperatures:
+    for attempt in range(_MAX_ATTEMPTS):
+        temperature = _FIRST_ATTEMPT_TEMPERATURE if attempt == 0 else _RETRY_TEMPERATURE
         try:
             raw = await client.complete_json(
                 SYSTEM_PROMPT, prompt, temperature=temperature, timeout=timeout
@@ -156,3 +167,36 @@ async def _complete_phase_with_retry(
         except (LLMError, ValueError) as exc:
             last_error = exc if isinstance(exc, LLMError) else LLMError(f"invalid phase payload: {exc}")
     raise last_error if last_error else LLMError("phase generation failed")
+
+
+async def _plan_with_retry(
+    client: LLMClient, norm_keyword: str, timeout: float
+) -> tuple[int, list[str]]:
+    """Call the plan step with bounded retries.
+
+    Three attempts total: first at temperature 0.4, remaining two at 0.2.
+    Each attempt validates the plan payload (total_phases must be an int
+    within 1..len(phase_names)); the last error is re-raised when all
+    attempts fail.
+    """
+    last_error: LLMError | None = None
+    for attempt in range(_MAX_ATTEMPTS):
+        temperature = _FIRST_ATTEMPT_TEMPERATURE if attempt == 0 else _RETRY_TEMPERATURE
+        try:
+            plan = await client.complete_json(
+                SYSTEM_PROMPT,
+                plan_prompt(norm_keyword),
+                temperature=temperature,
+                timeout=timeout,
+            )
+            try:
+                total_phases = int(plan["total_phases"])
+                phase_names = [str(n) for n in plan["phase_names"]]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise LLMError(f"invalid plan payload: {exc}") from exc
+            if not (1 <= total_phases <= len(phase_names)):
+                raise LLMError("total_phases does not match phase_names")
+            return total_phases, phase_names
+        except LLMError as exc:
+            last_error = exc
+    raise last_error if last_error else LLMError("plan generation failed")
