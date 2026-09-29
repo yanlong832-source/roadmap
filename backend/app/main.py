@@ -22,6 +22,10 @@ app.include_router(roadmaps_router)
 from app.routes.tutor import router as tutor_router
 app.include_router(tutor_router)
 
+# Per-topic learning-state progress routes - interactive spec Task 1.
+from app.routes.progress import router as progress_router
+app.include_router(progress_router)
+
 origins_raw = os.getenv("CORS_ORIGINS", "*").strip()
 origins = [o.strip() for o in origins_raw.split(",") if o.strip()] or ["*"]
 if "*" not in origins:
