@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Topic } from "../types/roadmap";
+import { MarkdownRenderer } from "./MarkdownRenderer";
 
 export interface TutorMessage {
   role: "user" | "assistant";
@@ -234,25 +235,48 @@ export function TutorDrawer({ open, onClose, keyword, activeTopic }: TutorDrawer
             它会结合你正在看的主题辅导你。
           </div>
         ) : (
-          messages.map((m, i) => (
-            <div
-              key={i}
-              data-testid={m.role === "user" ? "tutor-msg-user" : "tutor-msg-assistant"}
-              style={{
-                alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-                maxWidth: "85%",
-                padding: "8px 10px",
-                borderRadius: 10,
-                fontSize: 13,
-                lineHeight: 1.5,
-                whiteSpace: "pre-wrap",
-                background: m.role === "user" ? "#4f46e5" : "#f3f4f6",
-                color: m.role === "user" ? "#fff" : "#1f2937",
-              }}
-            >
-              {m.content || "…"}
-            </div>
-          ))
+          messages.map((m, i) =>
+            m.role === "user" ? (
+              <div
+                key={i}
+                data-testid="tutor-msg-user"
+                style={{
+                  alignSelf: "flex-end",
+                  maxWidth: "85%",
+                  padding: "8px 10px",
+                  borderRadius: 10,
+                  fontSize: 13,
+                  lineHeight: 1.5,
+                  whiteSpace: "pre-wrap",
+                  background: "#4f46e5",
+                  color: "#fff",
+                }}
+              >
+                {m.content || "…"}
+              </div>
+            ) : (
+              <div
+                key={i}
+                data-testid="tutor-msg-assistant"
+                style={{
+                  alignSelf: "flex-start",
+                  maxWidth: "85%",
+                  padding: "8px 10px",
+                  borderRadius: 10,
+                  fontSize: 13,
+                  lineHeight: 1.5,
+                  background: "#f3f4f6",
+                  color: "#1f2937",
+                }}
+              >
+                {m.content ? (
+                  <MarkdownRenderer content={m.content} />
+                ) : (
+                  <span>…</span>
+                )}
+              </div>
+            ),
+          )
         )}
         {error ? (
           <div
